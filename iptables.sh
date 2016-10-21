@@ -23,8 +23,6 @@ if ! __iptables_exists_fn 'with_temp_area'; then
     source ${SOURCE_LOCATION}core.sh
 fi
 
-TESTID=1
-
 iptables_temp_test_rule_success() {
     check_iptables_rule $@
     RESULT=$?
@@ -54,16 +52,94 @@ test_successes() {
 
     for TABLE in INPUT OUTPUT FORWARD; do
         for test_add in ${!TEST_ADD_SUCCESSES[@]}; do
+            TESTID=$((TESTID+1))
             TEST_DATA=${TEST_ADD_SUCCESSES[$test_add]}
             log_info "Starting test $TESTID - $TABLE $TEST_DATA"
             if iptables_temp_test_rule_success $TABLE $TEST_DATA; then
                 testAssertPass
             fi
-            TESTID=$((TESTID+1))
         done
     done
 }
 
-test_successes
+test_block_port() {
+    TESTID=$((TESTID+1))
 
-report
+    PORT_NO=2048
+    random_number PORT_NO 2048
+
+    insert_iptables_rule_unique INPUT -p tcp --dport $PORT_NO -j REJECT \
+                             --reject-with tcp-reset
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "ADD TCP REJECT RULE"; then
+        return 1
+    fi
+
+    add_iptables_rule_unique INPUT -p udp --dport $PORT_NO -j DROP
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "ADD UDP DROP RULE"; then
+        return 1
+    fi
+
+    spawn_async_subshell run_listener $PORT_NO --send-only
+    run_connect_and_quit localhost $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 1 "FIRST CONNECT CHECK"; then
+        return 1
+    fi
+
+    delete_iptables_rule INPUT -p tcp --dport $PORT_NO -j REJECT \
+                         --reject-with tcp-reset
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "Dropping iptables rule"; then
+        return 1
+    fi
+
+    ## NOTE: After this, if it is successful, the listener will be dead
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "SECOND CONNECT CHECK"; then
+        return 1
+    fi
+
+    delete_iptables_rule INPUT -p udp --dport $PORT_NO -j DROP
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "DEL UDP DROP RULE"; then
+        return 1
+    fi
+
+    insert_iptables_rule_unique INPUT -p tcp --dport $PORT_NO -j DROP
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "ADD TCP DROP RULE"; then
+        return 1
+    fi
+
+    spawn_async_subshell run_listener $PORT_NO --send-only
+    run_connect_and_quit localhost $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 1 "THIRD CONNECT CHECK"; then
+        return 1
+    fi
+
+    delete_iptables_rule INPUT -p tcp --dport $PORT_NO -j DROP
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "KILL TCP DROP RULE"; then
+        return 1
+    fi
+
+    run_connect_and_quit localhost $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "THIRD CONNECT CHECK"; then
+        return 1
+    fi
+
+    testAssertPass
+    return 0
+}
+
+
+TESTID=0
+test_successes
+test_block_port
+
+report | tee iptables-$(date -Iminutes).xml

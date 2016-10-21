@@ -80,9 +80,9 @@ testAssertPass(){
 }
 
 testAssertEQ(){
-    EXPECTED=$1
-    shift
     ACTUAL=$1
+    shift
+    EXPECTED=$1
     shift
     if [ "$EXPECTED" == "$ACTUAL" ]; then
         log_info "Passed $TESTID - ${FUNCNAME[1]} - $@"
@@ -95,9 +95,9 @@ testAssertEQ(){
 }
 
 testAssertNEQ(){
-    EXPECTED=$1
-    shift
     ACTUAL=$1
+    shift
+    EXPECTED=$1
     shift
     if [ "$EXPECTED" != "$1" ]; then
         log_info "Passed $TESTID - ${FUNCNAME[1]} - $@"
@@ -225,6 +225,32 @@ run_scp() {
         RETURN=1
     fi
     return $RETURN
+}
+
+run_netcat() {
+    NC_BIN=""
+    NC_RESULT=$1
+    RESULT=1
+    shift
+
+    if get_bin NC_BIN ncat nmap nmap-ncat; then
+        echo -n '' | $NC_BIN $@
+        RESULT=$?
+    fi
+    eval "$NC_RESULT=$RESULT"
+    return $RESULT
+}
+
+run_listener() {
+    RESULT=1
+    run_netcat RESULT -lvp $@
+    return $RESULT
+}
+
+run_connect_and_quit() {
+    RESULT=1
+    run_netcat RESULT -i 1 -w 1 $@
+    return $RESULT
 }
 
 log_output() {
@@ -358,6 +384,11 @@ add_iptables_rule() {
     return $?
 }
 
+insert_iptables_rule() {
+    iptables_rule -I $@
+    return $?
+}
+
 add_iptables_rule_unique() {
     while check_iptables_rule $@ 2>/dev/null >/dev/null; do
         delete_iptables_rule $@
@@ -366,6 +397,16 @@ add_iptables_rule_unique() {
     add_iptables_rule $@
     return $?
 }
+
+insert_iptables_rule_unique() {
+    while check_iptables_rule $@ 2>/dev/null >/dev/null; do
+        delete_iptables_rule $@
+    done
+
+    insert_iptables_rule $@
+    return $?
+}
+
 
 with_namespace() {
     SOURCE_LOCATION=""
@@ -402,6 +443,25 @@ random_string() {
         eval "$1=$RANDOM_STR"
     fi
     echo $RANDOM_STR
+    return 0
+}
+
+random_number() {
+    RESULT=$1
+    shift
+
+    BOUNDS_UPPER=32767
+    BOUNDS_LOWER=0
+    if [ ! -z "$1" ]; then
+        BOUNDS_LOWER=$1
+        shift
+        if [ ! -z "$1" ]; then
+            BOUNDS_UPPER=$1
+            shift
+        fi
+    fi
+    FIRST=$(($RANDOM % $BOUNDS_UPPER))
+    eval "$RESULT=$(($FIRST + $BOUNDS_LOWER))"
     return 0
 }
 
@@ -553,6 +613,16 @@ disassemble_stream() {
     write_binary_temp_file TEMP_FILENAME $@
     objdump -D -b binary -m $ARCH $TEMP_FILENAME
     rm $TEMP_FILENAME
+}
+
+kernel_setconfig() {
+    cf=$1/.config
+    if grep -q ^$2= $cf; then
+        sed -i "s:^$2=.*$:$2=$3:g" $cf
+    else
+        echo $2=$3 >> $cf
+    fi
+    return 0
 }
 
 make_vm() {

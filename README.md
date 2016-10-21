@@ -122,11 +122,11 @@ the currently running test once it has been added to a list.
 * testAssertFailure
   Adds the current test to the FAIL entries
 
-* testAssertEQ EXPECTED ACTUAL [TEXT]
+* testAssertEQ ACTUAL EXPECTED [TEXT]
   If the values are equal, log and return 0.  Otherwise, add the test to the failure
   case, log, and return 1.
   
-* testAssertNEQ EXPECTED ACTUAL [TEXT]
+* testAssertNEQ ACTUAL EXPECTED [TEXT]
   Same as previous, only for values which are not equal.
 
 
