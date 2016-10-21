@@ -139,6 +139,7 @@ test_block_port() {
 
 
 TESTID=0
+export MASTER_LOG_FILE=iptables-$(date -Iminutes).log
 test_successes
 test_block_port
 
