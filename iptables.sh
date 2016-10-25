@@ -138,9 +138,76 @@ test_block_port() {
 }
 
 
+test_nfqueue() {
+    TESTID=$((TESTID+1))
+
+    PORT_NO=2048
+    random_number PORT_NO 2048
+
+    if ! elevated_exec pip install NetfilterQueue; then
+        testAssertFailure "FAILURE - need NetfilterQueue installed"
+        return 1
+    fi    
+    
+    PYFILE=""
+    write_binary_temp_file PYFILE <<<00
+
+    cat >$PYFILE <<EOF
+from netfilterqueue import NetfilterQueue
+
+numpkts = 2
+def print_and_accept(pkt):
+    global numpkts
+    print pkt
+    if numpkts == 0:
+        pkt.accept()
+    elif numpkts > 0:
+        numpkts -= 1
+        pkt.drop()
+
+nfqueue = NetfilterQueue()
+nfqueue.bind(1, print_and_accept)
+try:
+    nfqueue.run()
+except KeyboardInterrupt:
+    print
+
+EOF
+
+    insert_iptables_rule_unique INPUT -p tcp --dport $PORT_NO  -j NFQUEUE --queue-num 1
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "Insert Queue rule"; then
+        return 1
+    fi
+    
+    spawn_async_subshell elevated_exec python $PYFILE
+    spawn_async_subshell run_listener $PORT_NO --send-only
+
+    run_connect_and_quit localhost $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 1 "First connect attempt"; then
+        return 1
+    fi
+
+    run_connect_and_quit localhost $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 1 "Second connect attempt"; then
+        return 1
+    fi
+
+    run_connect_and_quit localhost $PORT_NO --send-only
+    RESULT=$?
+    if ! testAssertEQ $RESULT 0 "Third connect attempt"; then
+        return 1
+    fi
+
+    rm $PYFILE
+}
+
 TESTID=0
 export MASTER_LOG_FILE=iptables-$(date -Iminutes).log
 test_successes
 test_block_port
+test_nfqueue
 
 report | tee iptables-$(date -Iminutes).xml
