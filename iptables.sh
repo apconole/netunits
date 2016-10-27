@@ -82,7 +82,7 @@ test_block_port() {
     fi
 
     spawn_async_subshell run_listener $PORT_NO --send-only
-    run_connect_and_quit localhost $PORT_NO --send-only
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
     if ! testAssertEQ $RESULT 1 "FIRST CONNECT CHECK"; then
         return 1
@@ -115,7 +115,7 @@ test_block_port() {
     fi
 
     spawn_async_subshell run_listener $PORT_NO --send-only
-    run_connect_and_quit localhost $PORT_NO --send-only
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
     if ! testAssertEQ $RESULT 1 "THIRD CONNECT CHECK"; then
         return 1
@@ -127,7 +127,7 @@ test_block_port() {
         return 1
     fi
 
-    run_connect_and_quit localhost $PORT_NO --send-only
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
     if ! testAssertEQ $RESULT 0 "THIRD CONNECT CHECK"; then
         return 1
@@ -177,27 +177,31 @@ EOF
     insert_iptables_rule_unique INPUT -p tcp --dport $PORT_NO  -j NFQUEUE --queue-num 1
     RESULT=$?
     if ! testAssertEQ $RESULT 0 "Insert Queue rule"; then
+        rm $PYFILE
         return 1
     fi
     
-    spawn_async_subshell elevated_exec python $PYFILE
+    spawn_async_subshell elevated_exec timeout -s SEGV 5m python $PYFILE
     spawn_async_subshell run_listener $PORT_NO --send-only
 
-    run_connect_and_quit localhost $PORT_NO --send-only
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
     if ! testAssertEQ $RESULT 1 "First connect attempt"; then
+        rm $PYFILE
         return 1
     fi
 
-    run_connect_and_quit localhost $PORT_NO --send-only
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
     if ! testAssertEQ $RESULT 1 "Second connect attempt"; then
+        rm $PYFILE
         return 1
     fi
 
-    run_connect_and_quit localhost $PORT_NO --send-only
+    run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
     if ! testAssertEQ $RESULT 0 "Third connect attempt"; then
+        rm $PYFILE
         return 1
     fi
 
