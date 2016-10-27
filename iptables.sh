@@ -148,7 +148,7 @@ test_nfqueue() {
         testAssertFailure "FAILURE - need NetfilterQueue installed"
         return 1
     fi    
-    
+
     PYFILE=""
     write_binary_temp_file PYFILE <<<00
 
@@ -180,7 +180,7 @@ EOF
         rm $PYFILE
         return 1
     fi
-    
+
     spawn_async_subshell elevated_exec timeout -s SEGV 5m python $PYFILE
     spawn_async_subshell run_listener $PORT_NO --send-only
 
