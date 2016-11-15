@@ -147,7 +147,7 @@ test_nfqueue() {
     if ! elevated_exec pip install NetfilterQueue; then
         testAssertFailure "FAILURE - need NetfilterQueue installed"
         return 1
-    fi    
+    fi
 
     PYFILE=""
     write_binary_temp_file PYFILE <<<00
@@ -174,6 +174,11 @@ except KeyboardInterrupt:
 
 EOF
 
+    if [ ! -e $PYFILE ]; then
+        testAssertFailure Missing $PYFILE
+        return 1
+    fi
+
     insert_iptables_rule_unique INPUT -p tcp --dport $PORT_NO  -j NFQUEUE --queue-num 1
     RESULT=$?
     if ! testAssertEQ $RESULT 0 "Insert Queue rule"; then
@@ -181,8 +186,13 @@ EOF
         return 1
     fi
 
+    log_info Running python file $PYFILE
+
     spawn_async_subshell elevated_exec timeout -s SEGV 5m python $PYFILE
     spawn_async_subshell run_listener $PORT_NO --send-only
+
+    # Give time for the processes to start
+    sleep 10
 
     run_connect_and_quit 127.0.0.1 $PORT_NO --send-only
     RESULT=$?
