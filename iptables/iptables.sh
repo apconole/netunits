@@ -63,8 +63,6 @@ test_successes() {
 }
 
 test_block_port() {
-    TESTID=$((TESTID+1))
-
     PORT_NO=2048
     random_number PORT_NO 2048
 
@@ -139,8 +137,6 @@ test_block_port() {
 
 
 test_nfqueue() {
-    TESTID=$((TESTID+1))
-
     PORT_NO=2048
     random_number PORT_NO 2048
 
@@ -219,9 +215,20 @@ EOF
 }
 
 TESTID=0
-export MASTER_LOG_FILE=iptables-$(date -Iminutes).log
-test_successes
-test_block_port
-test_nfqueue
+RUNTIME=$(date -Iminutes)
+export MASTER_LOG_FILE=iptables-${RUNTIME}.log
+for TEST in $(egrep ^test_ $0 | egrep '[({]' | sed 's@[{()}]*@@g'); do
+    log_debug "Running $TEST"
+    TESTID=$((TESTID+1))
+    if [ "X$1" != "X" ]; then
+        if [ "$1" != "$TEST" ]; then
+            testAssertSkip "named $TEST"
+        else
+            $TEST
+        fi
+    else
+        $TEST
+    fi
+done
 
-report | tee iptables-$(date -Iminutes).xml
+report | tee iptables-${RUNTIME}.xml

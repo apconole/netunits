@@ -18,7 +18,7 @@
 PASSED=()
 FAILED=()
 
-report(){
+report_oldxml(){
     # xunit xml
     echo "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone='yes'?>"
     echo "<TestRun>"
@@ -39,6 +39,12 @@ report(){
         echo "    <Test id=\"$2\"><Name>$1</Name></Test>"
     done
     echo "  </SuccessfulTests>"
+    echo "  <SkippedTests>"
+    for SKIP in "${SKIPPED[@]}"; do
+        set $SKIPPED
+        echo "    <SkippedTest id=\"$2\"><Name>$1</Name></SkippedTest>"
+    done
+    echo "  </SkippedTests>"
     echo "  <Statistics>"
     NUMTESTS=("${PASSED[@]}" "${FAILED[@]}")
     echo "     <Tests>${#NUMTESTS[@]}</Tests>"
@@ -49,6 +55,47 @@ report(){
 
     echo "</TestRun>"
     IFS=$OLDIFS
+}
+
+report_xunitxml() {
+    echo "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone='yes'?>"
+    echo "<testsuites>"
+    NUM_FAILED_TESTS=${#FAILED[@]}
+    NUM_PASSED_TESTS=${#PASSED[@]}
+    NUM_SKIPPED_TESTS=${#SKIPPED[@]}
+    TOTAL_TESTS=$((NUM_FAILED_TESTS+NUM_PASSED_TESTS+NUM_SKIPPED_TESTS))
+    echo "  <testsuite name=\"netunits\" tests=$TOTAL_TESTS failures=\"${#FAILED[@]}\" skipped=\"${#SKIPPED[@]}\" errors=\"0\">"
+    OLDIFS=$IFS; IFS=','
+    for TEST in "${PASSED[@]}"; do
+        set $TEST
+        echo "    <testcase name=\"$1\"/>"
+    done
+    for TEST in "${FAILED[@]}"; do
+        set $TEST
+        echo "    <testcase name=\"$1\">"
+        echo "      <failure>"
+        echo "          ---"
+        echo "            operator: equal"
+        echo "            expected: $3"
+        echo "            actual:   $4"
+        echo "            at: $5"
+        echo "          ---"
+        echo "      </failure>"
+        echo "    </testcase>"
+    done
+    for TEST in "${SKIPPED[@]}"; do
+        set $TEST
+        echo "    <testcase name=\"$1\">"
+        echo "      </skipped>"
+        echo "    </testcase>"
+    done
+    echo "  </testsuite>"
+    echo "</testsuites>"
+    IFS=$OLDIFS
+}
+
+report() {
+    report_xunitxml
 }
 
 log_debug() {
@@ -76,6 +123,16 @@ testAssertFailure(){
 testAssertPass(){
     PASSED=("${PASSED[@]}" "${FUNCNAME[1]},$TESTID,pass,pass,$@")
     log_info "Passed $TESTID - ${FUNCNAME[1]} - $@"
+    return 1
+}
+
+testAssertSkip(){
+    SKIPNAME_TO_ADD=${FUNCNAME[1]}
+    if [ "$2" != "" ]; then
+        SKIPNAME_TO_ADD="$2"
+    fi
+    SKIPPED=("${SKIPPED[@]}" "${SKIPNAME_TO_ADD},$TESTID,skipped,skipped,$@")
+    log_info "Skipped $TESTID - ${SKIPNAME_TO_ADD} - $@"
     return 1
 }
 
@@ -137,24 +194,35 @@ EOF
     return $?
 }
 
-try_install() {
-    log_debug Attempting to install one of \[ "$@" \]
+try_rpm_install() {
     if /usr/bin/rpm -q -f /usr/bin/rpm >/dev/null 2>&1; then
         log_debug "Detected RPM system"
         if which dnf >/dev/null 2>&1; then
-            elevated_exec dnf install -y $2
+            elevated_exec dnf install -y $1
         else
-            elevated_exec yum install -y $2
+            elevated_exec yum install -y $1
         fi
-    elif /usr/bin/dpkg --search /usr/bin/dpkg 2>&1; then
-        log_debug "Detected DEB system"
-        apt-get install -y $1
     fi
+}
+
+try_deb_install() {
+    if /usr/bin/dpkg --search /usr/bin/dpkg >/dev/null 2>&1; then
+        log_debug "Detected DEB system"
+        elevated_exec apt-get install -y $1
+    fi
+}
+
+try_install() {
+    log_debug Attempting to install one of \[ "$@" \]
+
+    try_deb_install "$1"
+    try_rpm_install "$2"
+
     return 0
 }
 
 get_bin(){
-    BINARY=`which $2 2>/dev/null`
+    BINARY=$(which $2 2>/dev/null)
     if [ "$BINARY" == "" ]; then
         log_debug no binary
         if [ "$AUTO_INSTALL" == "yes" ]; then
@@ -165,6 +233,9 @@ get_bin(){
                 log_debug failed installing binary
                 return 1
             fi
+        else
+            log_err "Binary '$2' not installed"
+            return 1
         fi
     fi
     eval "$1=$BINARY"
@@ -305,6 +376,24 @@ spawn_async_subshell() {
     done
     (MASTER_LOG_FILE=$EXPORT_LOG $NSENTER $@) &
     return $!
+}
+
+get_config() {
+    if [ -e "${HOME}/.netunits.conf" ]; then
+        source "${HOME}/.netunits.conf"
+    fi
+
+    if set | grep ${1}= 2>/dev/null >/dev/null; then
+        VAL=\$
+        VAL+=$1
+        NEWVAL=$(eval echo $VAL)
+        echo $NEWVAL
+    else
+        echo ""
+        echo "#Variable addition on $(date)" >> ${HOME}/.netunits.conf 
+        echo "#${1}=" >> ${HOME}/.netunits.conf
+    fi
+    return 0
 }
 
 dotimes() {
@@ -501,8 +590,24 @@ create_veth_pair() {
     fi
     if [ $? ]; then
         if [ "$1" != "" ]; then
-            elevated_exec $IPBIN link set netns $1
+            elevated_exec $IPBIN link set netns $1 dev $PORT_A
         fi
+    fi
+    return $?
+}
+
+create_bridge() {
+    IPBIN=""
+    if get_bin IPBIN ip iproute2 iproute; then
+        elevated_exec $IPBIN link set netns $2 dev $1
+    fi
+    return $?
+}
+
+set_port_namespace() {
+    IPBIN=""
+    if get_bin IPBIN ip iproute2 iproute; then
+        elevated_exec $IPBIN link set netns $2 dev $1
     fi
     return $?
 }
@@ -531,6 +636,14 @@ launch_iperf() {
         $IPERFBIN $@ | tee -a $IPERF_LOG_FILE
     fi
     return $?
+}
+
+is_process_running() {
+    PID=$(pidof $1)
+    if [ "$PID" != "" ]; then
+        return 0
+    fi
+    return 1
 }
 
 launch_iperf_server() {
@@ -565,6 +678,7 @@ cd_and_run() {
     popd >/dev/null 2>&1
 
 }
+
 with_temp_area() {
     TMPDIR=$(mktemp -d)  # NOTE: this could be unsafe
     RESULT=0
@@ -626,102 +740,117 @@ kernel_setconfig() {
 }
 
 make_vm() {
-    if [ -z ${FEDORA_WORKSTATION_VERSIONS+x} ]; then
-        FEDORA_WORKSTATION_LATEST="24"
-        FEDORA_WORKSTATION_VERSIONS=(23 24)
-        FEDORA_WORKSTATION_IMAGES_x86_64=(http://ftp.uci.edu/fedora/linux/releases/23/Workstation/x86_64/iso/Fedora-Live-Workstation-x86_64-23-10.iso http://ftp.uci.edu/fedora/linux/releases/24/Workstation/x86_64/iso/Fedora-Workstation-Live-x86_64-24-1.2.iso)
-        FEDORA_WORKSTATION_IMAGES_i686=(http://ftp.uci.edu/fedora/linux/releases/23/Workstation/i386/iso/Fedora-Live-Workstation-i686-23-10.iso http://ftp.uci.edu/fedora/linux/releases/24/Workstation/i386/iso/Fedora-Workstation-Live-i386-24-1.2.iso)
-        FEDORA_WORKSTATION_IMAGES_armhfp=()
+    # Uses oz-install to generate a template file and install the VM
+    # $1 = vm name
+    # $2 = Distro name
+    # $3 = Distro version
+    # $4 = arch
+    # $5 = root password
+    # $6 = iso image
+
+    if [ "X$1" == "X" ]; then
+        log_err "Need to specify a VM name"
+        return 1
+    fi
+    VMNAME="$1"
+    shift
+
+    if [ "X$1" == "X" ]; then
+        log_err "Need to specify a Distro name (ex: Fedora, Debian, Ubuntu)"
+        return 1
+    fi
+    DISTNAME="$1"
+    shift
+
+    if [ "X$1" == "X" ]; then
+        log_err "Need to specify a Distro version (eg: 18.04, 28, etc.)"
+        return 1
+    fi
+    DISTVER="$1"
+    shift
+
+    if [ "X$1" == "X" ]; then
+        log_err "Need to specify a Distro arch (eg: x86-64)"
+        return 1
+    fi
+    DISTARCH="$1"
+    shift
+
+    if [ "X$1" == "X" ]; then
+        log_err "Need to specify a root password"
+        return 1
+    fi
+    ROOTPW="$1"
+    shift
+
+    if [ "X$1" == "X" ]; then
+        log_err "Need to specify an iso image location"
+        return 1
+    fi
+    ISOIMAGE="$1"
+    shift
+
+    METHOD="iso"
+
+    if ! get_bin OZ_INSTALL_BIN oz-install oz oz; then
+        log_err "Need to install oz-install"
+        return 1
     fi
 
-    if [ -z ${FEDORA_SERVER_VERSIONS+x} ]; then
-        FEDORA_SERVER_LATEST="24"
-        FEDORA_SERVER_VERSIONS=(23 24)
-        FEDORA_SERVER_IMAGES_x86_64=(http://ftp.uci.edu/fedora/linux/releases/23/Server/x86_64/iso/Fedora-Server-DVD-x86_64-23.iso http://ftp.uci.edu/fedora/linux/releases/24/Server/x86_64/iso/Fedora-Server-dvd-x86_64-24-1.2.iso)
-        FEDORA_SERVER_IMAGES_i686=(http://ftp.uci.edu/fedora/linux/releases/23/Server/i386/iso/Fedora-Server-DVD-i386-23.iso http://ftp.uci.edu/fedora/linux/releases/24/Server/i386/iso/Fedora-Server-dvd-i386-24-1.2.iso)
+    if ! get_bin VIRSH_BIN virsh libvirt libvirt; then
+        log_err "Need to install libvirt"
+        return 1
     fi
 
-    VMNAME=""
-    VMOS=""
-    VMOS_VER=""
-    VMARCH="x86_64"
-    VMKPARAM=""
-    VMROOTPW=$(random_string)
-    VMDISKSIZE="8G"
+    FILENAME=""
+    LIBVIRTNAME=""
+    make_temp_file FILENAME
+    make_temp_file LIBVIRTNAME
+    cat >$FILENAME <<EOF
+<template>
+  <name>$VMNAME</name>
+  <description>Autogenerated VM For testing</description>
+  <os>
+    <name>$DISTNAME</name>
+    <version>$DISTVER</version>
+    <arch>$DISTARCH</arch>
+    <rootpw>$ROOTPW</rootpw>
+    <install type="iso">
+      <iso>$ISOIMAGE</iso>
+    </install>
+  </os>
+</template>
+EOF
 
-    while [ "$1" != "" ]; do
-        if [ "${1:0:2}" == "--" ]; then
-            case ${1:2} in
-                vmname)
-                    VMNAME="$2"
-                    shift
-                    ;;
-                vmos)
-                    VMOS=$2
-                    shift
-                    ;;
-                vmver)
-                    VMOS_VER=$2
-                    shift
-                    ;;
-                arch|vmarch)
-                    VMARCH=$2
-                    shift
-                    ;;
-                kcmd)
-                    VMKPARAM="$2"
-                    shift
-                    ;;
-                password)
-                    VMROOTPW="$2"
-                    shift
-                    ;;
-                size)
-                    VMDISKSIZE="$2"
-                    shift
-                    ;;
-                *)
-                    log_err Unknown Option $1
-                    return 1
-                    ;;
-            esac
-        else
-            if [ "$VMNAME" == "" ]; then
-                VMNAME="$1"
-            elif [ "$VMOS" == "" ]; then
-                VMOS=$1
-            elif [ "$VMOS_VER" == "" ]; then
-                VMOS_VER=$1
-            fi
+    RETVAL=0
+    if ! $OZ_INSTALL_BIN -d3 "$FILENAME" -x "$LIBVIRTNAME"; then
+        RETVAL=1
+    fi
+
+    if [ $RETVAL -eq 0 -a "X$1" != "Xno" ]; then
+        if ! elevated_exec $VIRSH_BIN define $LIBVIRTNAME; then
+            RETVAL=1
         fi
-        shift
-    done
-
-    if [ "$VMOS_VER" == "" ]; then
-        VMOS_VER="latest"
     fi
 
-    if [ "$VMNAME" == "" -o "$VMOS" == "" ]; then
-        log_err Unable to instantiated OS - need name, type, and version
-        log_debug NAME: $VMNAME , OS: $VMOS , VER: $VMOS_VER
+    rm $FILENAME
+    [ "X$1" != "Xno" ] && rm $LIBVIRTNAME
+    return $RETVAL
+}
+
+make_vhost_vm() {
+    RETVAL=0
+
+    if ! make_vm "$1" "$2" "$3" "$4" "$5" "$6" "no"; then
         return 1
     fi
 
-    VERS=${VMOS^^}_VERSIONS
-    eval LOAD_VERS_TYPE=\$$VERS
-    if [ "$LOAD_VERS_TYPE" == "" ]; then
-        log_err Unknown VMOS - ${VMOS}.  Set the ${VMOS^^}_VERSIONS variable
-        log_debug VERS: $VERS
-        return 1
+    sed -i s@bridge=\"virbr0\"/\>@bridge=\"$7\"/\>@g $LIBVIRTNAME
+    if ! elevated_exec virsh define $LIBVIRTNAME; then
+        RETVAL=1
     fi
-
-    if [ "$VMOS_VER" == "latest" ]; then
-        VERS_LATEST=${VMOS^^}_LATEST
-        log_debug LATEST: \$$VERS_LATEST
-        eval "VMOS_VER=\${$VERS_LATEST}"
-    fi
-
-    log_debug VERS: $VMOS_VER
+    rm $LIBVIRTNAME
+    return $RETVAL
 }
 
 
