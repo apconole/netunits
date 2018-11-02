@@ -60,13 +60,25 @@ stop_openvswitch() {
         elevated_exec ${OVS_PREFIX}/bin/ovs-vsctl del-br $brname
         log_info "Deleted bridge $brname"
     done
+
     elevated_exec ${OVS_PREFIX}/share/openvswitch/scripts/ovs-ctl stop
+
+    for port in $CLEAN_PORTS; do
+        log_info "Kill port $port"
+        elevated_exec ip link del "$port"
+    done
+    CLEAN_PORTS=""
+
+    for ns in $CLEAN_NS; do
+        elevated_exec ip netns delete "$ns"
+    done
+    CLEAN_NS=""
     return 0
 }
 
 OvsTestAssertFailure() {
     testAssertFailure $@
-    stop_openvswitch
+    # stop_openvswitch
     return 1
 }
 
@@ -83,8 +95,14 @@ test_openvswitch_starts_and_stops() {
 }
 
 ovs_vsctl() {
-    log_info "execute ovs-vsctl $str"
+    log_info "execute ovs-vsctl $@"
     elevated_exec ${OVS_PREFIX}/bin/ovs-vsctl $@
+    return $?
+}
+
+ovs_ofctl() {
+    log_info "execute ovs-ofctl $@"
+    elevated_exec ${OVS_PREFIX}/bin/ovs-ofctl $@
     return $?
 }
 
@@ -94,14 +112,14 @@ create_ovs_bridge() {
 
     str="add-br $brname"
     if [[ "$1" != "" ]]; then
-        str=$str -- set Bridge $brname datapath_type=$1
+        str="$str -- set Bridge $brname datapath_type=$1"
     fi
 
     ovs_vsctl $str
     return $?
 }
 
-attach_veth_ovs_bridge() {
+attach_veth_ovs_userspace_bridge() {
     brname=$1
     shift
     
@@ -111,14 +129,22 @@ attach_veth_ovs_bridge() {
     veth_name=$1
     shift
 
-    find_br=$(ovs_vsctl "list" | grep -o $brname)
+    find_br=$(ovs_vsctl "show" | grep Bridge | grep -o $brname)
     if [ "$find_br" != "$brname" ]; then
-        create_ovs_bridge "$brname"
+        if ! create_ovs_bridge "$brname" "netdev"; then
+            return 1
+        fi
     fi
 
-    create_veth_pair "${veth_name}" "ovstest_${veth_name}" "$namespace"
-    
+    make_netns "$namespace"
+    CLEAN_NS="$CLEAN_NS $namespace"
+
+    if ! create_veth_pair "${veth_name}" "ovstest_${veth_name}" "$namespace"; then
+        return 1
+    fi
+
     ovs_vsctl add-port "$brname" "ovstest_${veth_name}"
+    CLEAN_PORTS="$CLEAN_PORTS ovstest_${veth_name}"
 }
 
 test_openvswitch_ns_ping() {
@@ -251,9 +277,7 @@ test_openvswitch_userspace_conntrack_xons_per_sec() {
 
     sleep 15
 
-    make_netns ns0
-    make_netns ns1
-    attach_veth_ovs_bridge "tbr0" "ns1" "v0"
+    attach_veth_ovs_userspace_bridge "tbr0" "ns1" "v0"
     if [ $? == 1 ]; then
         return 1
     fi
@@ -275,6 +299,8 @@ test_openvswitch_userspace_conntrack_xons_per_sec() {
 
     sleep 2
 
+    make_netns ns0
+    CLEAN_NS="$CLEAN_NS ns0"
     elevated_exec ip link set tap0 netns ns0
     elevated_exec ip netns exec ns0 ip link set tap0 up
     elevated_exec ip netns exec ns0 ip addr add 172.31.110.1/24 dev tap0
@@ -282,12 +308,70 @@ test_openvswitch_userspace_conntrack_xons_per_sec() {
     elevated_exec ip netns exec ns1 ip link set v0 up
     elevated_exec ip netns exec ns1 ip addr add 172.31.110.2/24 dev v0
 
-    elevated_exec ip netns exec ns1 ping -c 4 172.31.110.1
+    start_echo_server_ns ns0
 
+    ovs_ofctl del-flows tbr0
+
+    ovs_ofctl add-flow tbr0 'table=0,priority=10,ct_state=-trk,ip,actions=ct(table=1)'
+    ovs_ofctl add-flow tbr0 'table=0,priority=10,arp,actions=NORMAL'
+    ovs_ofctl add-flow tbr0 'table=0,priority=1,drop'
+
+    ovs_ofctl add-flow tbr0 'table=1,priority=1000,ct_state=+new+trk,tcp,tp_dst=4321,actions=ct(commit),output:vhu0'
+    ovs_ofctl add-flow tbr0 'table=1,priority=900,ct_state=+est+trk,in_port=vhu0,actions=output:ovstest_v0'
+    ovs_ofctl add-flow tbr0 'table=1,priority=900,ct_state=+est+trk,in_port=ovstest_v0,actions=output:vhu0'
+    ovs_ofctl add-flow tbr0 'table=1,priority=1,drop'
+
+    
     testAssertPass
     pkill -f -x -9 'tail -f /dev/null'
+    pkill -f -x -9 "/usr/bin/python $TMPFILE"
     stop_openvswitch
     return 0
+}
+
+test_openvswitch_ns_bond() {
+    start_openvswitch || OvsTestAssertFailure "Unable to start ovs"
+    if [ $? == 1 ]; then
+        return 1
+    fi
+
+    make_netns ns0
+    attach_veth_ovs_userspace_bridge "tbr0" "ns0" "v0" || \
+        OvsTestAssertFailure "Unable to create v0"
+    if [ $? == 1 ]; then
+        return 1
+    fi
+
+    attach_veth_ovs_userspace_bridge "tbr0" "ns0" "v1" || \
+        OvsTestAssertFailure "Unable to create v1"
+    if [ $? == 1 ]; then
+        return 1
+    fi
+
+    ovs_vsctl del-port ovstest_v0 && ovs_vsctl del-port ovstest_v1
+
+    ovs_vsctl add-bond tbr0 bond0 ovstest_v0 ovstest_v1 -- \
+              set port bond0 lacp=active -- \
+              set port bond0 bond_mode=balance-tcp -- \
+              set port bond0 other-config:lacp-time=fast -- \
+              set port bond0 other-config:lacp-fallback-ab=true || \
+        OvsTestAssertFailure "Unable to create bond"
+    if [ $? == 1 ]; then
+        return 1
+    fi
+
+    with_namespace ns0 ip link add ns0bond0 type bond miimon 100 mode 802.3ad
+    with_namespace ns0 ip link set v0 master ns0bond0
+    with_namespace ns0 elevated_exec ip link set v1 master ns0bond0
+    with_namespace ns0 ip addr add 172.31.110.12/24 dev ns0bond0
+    with_namesapce ns0 ip link set ns0bond0 up
+
+    elevated_exec ip link set ovstest_v0 up
+    elevated_exec ip link set ovstest_v1 up
+    elevated_exec ip addr add 172.31.110.11/24 dev tbr0
+    elevated_exec ip link set tbr0 up
+
+    run_ping 172.31.110.12
 }
 
 TESTID=0
@@ -305,6 +389,7 @@ for TEST in $(egrep ^test_ $0 | egrep '[({]' | sed 's@[{()}]*@@g'); do
             testAssertSkip "skipping $TEST" "$TEST"
         else
             $TEST
+            # stop_openvswitch
         fi
     else
         $TEST
